@@ -44,6 +44,11 @@ test('التطبيق مستقل: manifest باسمه وأيقوناته، بلا
   }
 });
 
+test('النشر على GitHub Pages: ملف .nojekyll موجود (بدونه يحاول Pages بناء الموقع بـ Jekyll) واختبارات CI مفعّلة', () => {
+  assert.ok(fs.existsSync(path.join(root, '.nojekyll')), '.nojekyll');
+  assert.match(read('.github/workflows/test.yml'), /npm test/);
+});
+
 test('sw.js: يمسح كاشاته القديمة فقط (النطاق مشترك مع تطبيقات أخرى على github.io)', () => {
   const sw = read('sw.js');
   assert.match(sw, /x\.startsWith\('connscreen-'\)&&x!==C/);
