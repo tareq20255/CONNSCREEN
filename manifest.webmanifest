@@ -1,0 +1,32 @@
+{
+  "name": "CONNSCREEN — شاشات العرض",
+  "short_name": "CONNSCREEN",
+  "description": "إدارة شاشات العرض في الفروع: محتوى مختلف أو مشترك حسب الفرع والمكان والموعد",
+  "lang": "ar",
+  "dir": "rtl",
+  "display": "standalone",
+  "start_url": "./",
+  "scope": "./",
+  "theme_color": "#0f4c75",
+  "background_color": "#f6f3ec",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
