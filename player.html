@@ -44,7 +44,7 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
 // يسأل القاعدة كل دقيقة عن قائمة العرض (الدالة sg_player_poll)، ويكمل على آخر قائمة لو انقطع الإنترنت.
 (function () {
   'use strict';
-  var PLAYER_VERSION = '1.0.0'; // يُرفع مع كل إصدار: الشاشات تعيد تحميل الصفحة لما تلاقي رقم مختلف على السيرفر
+  var PLAYER_VERSION = '1.0.1'; // يُرفع مع كل إصدار: الشاشات تعيد تحميل الصفحة لما تلاقي رقم مختلف على السيرفر
   var CFG = window.SIGNAGE_CONFIG;
   var Layout = window.SignageLayout;
   var POLL_MS = 60000;             // الشاشة المربوطة
@@ -53,6 +53,9 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
   var PAIR_FAST_FOR_MS = 600000;
   var RETRY_MS = 15000;            // بعد فشل الاتصال
   var UPDATE_CHECK_MS = 6 * 3600000;
+  var GROUP_START_MS = 12000;      // مجموعة فيديوهات لم تبدأ كلها خلال هذه المهلة: الجهاز يشغّل فيديو واحدًا في المرة
+  var GROUP_STALL_MS = 8000;       // بدأت المجموعة لكن فيديو منها لم يشتغل خلال هذه المهلة: نفس الحكم
+  var ONE_VIDEO_FOR_MS = 6 * 3600000; // مدة البقاء على العرض المتتابع قبل تجربة العرض المتجاور من جديد
   var ID_RE = /^[A-Za-z0-9_-]{16,64}$/;
   var K_DEVICE = 'bw-signage:device';
   var K_PLAYLIST = 'bw-signage:playlist';
@@ -85,7 +88,13 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
   var version = null;
   var screenName = '';
   var cur = -1;
-  var timer = null, guard = null, pollTimer = null, clockTimer = null;
+  var timer = null, guard = null, stall = null, pollTimer = null, clockTimer = null;
+  // متصفح تلفزيونات Samsung (Tizen) و LG (webOS) يشغّل فيديو واحدًا فقط في المرة: الثاني يوقف الأول أو لا يُحمَّل أصلًا.
+  // على هذه الأجهزة (وأي جهاز يتضح أنه مثلها) تُعرض فيديوهات المجموعة واحدًا بعد الآخر بملء الشاشة بدل شاشة سوداء
+  var TV_ONE_VIDEO = /Tizen|SMART-TV|Web0S|webOS/i.test((window.navigator && window.navigator.userAgent) || '');
+  var oneVideoUntil = 0;          // جهاز آخر اتضح أنه لا يشغّل فيديوهين معًا: عرض متتابع حتى هذا الوقت
+  var raw = [];                   // القائمة كما جاءت من القاعدة، و items هي المبنية منها لهذا الجهاز
+  var builtOne = false;           // items مبنية بوضع «فيديو واحد في المرة»؟
   var curAdvance = null;          // ينقل للعنصر التالي (خاص بالعنصر المعروض الآن)
   var curVideo = null;            // عنصر الفيديو المعروض الآن، إن وُجد
   var fails = 0;
@@ -120,7 +129,57 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
     var nx = items[(cur + 1) % items.length];
     if (nx && nx.type === 'image' && items.length > 1) { var im = new Image(); im.src = nx.url; }
   }
-  function clearTimers() { clearTimeout(timer); clearTimeout(guard); timer = guard = null; }
+  function clearTimers() { clearTimeout(timer); clearTimeout(guard); clearTimeout(stall); timer = guard = stall = null; }
+  function oneVideoNow() { return TV_ONE_VIDEO || Date.now() < oneVideoUntil; }
+  function videoCount(item) {
+    var c = 0, i, parts = item.parts || [];
+    for (i = 0; i < parts.length; i++) if (parts[i].kind === 'video') c++;
+    return c;
+  }
+  // القائمة لهذا الجهاز: في وضع «فيديو واحد» المجموعة التي فيها أكثر من فيديو تتحول لأجزائها، كل جزء عنصر مستقل بملء الشاشة.
+  // مجموعة الصور (أو الصور مع فيديو واحد) تبقى شبكة كما هي
+  function build(list) {
+    var one = oneVideoNow(), out = [], i, j, it, part;
+    builtOne = one;
+    for (i = 0; i < list.length; i++) {
+      it = list[i];
+      if (one && it.type === 'group' && videoCount(it) > 1) {
+        for (j = 0; j < it.parts.length; j++) {
+          part = it.parts[j];
+          // «تملأ الشاشة» مناسبة لخانة في الشبكة، لكنها بملء الشاشة تقص معظم فيديو طولي على شاشة عرضية: الجزء يُعرض كاملًا
+          out.push({ id: it.id + ':' + j, of: it.id, type: part.kind, url: part.url, updated: it.updated,
+            fit: 'contain', bg: it.bg, fg: it.fg, duration: it.duration });
+        }
+      } else {
+        out.push(it);
+      }
+    }
+    return out;
+  }
+  // تغيّر وضع الجهاز والقائمة مبنية بالوضع القديم: نعيد بناءها ونقف عند آخر جزء من العنصر (أو المجموعة) الذي كان معروضًا
+  function resync() {
+    var prev = cur >= 0 && items[cur] ? items[cur] : null, key, i;
+    items = build(raw);
+    cur = -1;
+    if (!prev) return;
+    key = prev.of !== undefined ? prev.of : prev.id;
+    for (i = 0; i < items.length; i++) if (items[i].id === key || items[i].of === key) cur = i;
+  }
+  // اتضح أثناء عرض مجموعة أن الجهاز لا يشغّل فيديوهاتها معًا: نعرض أجزاءها الآن واحدًا بعد الآخر، ونبقى على ذلك مدة
+  function useOneVideo(group) {
+    var i, at = -1;
+    oneVideoUntil = Date.now() + ONE_VIDEO_FOR_MS;
+    stopPlayback();
+    items = build(raw);
+    for (i = 0; i < items.length; i++) if (items[i].of === group.id) { at = i; break; }
+    cur = at - 1; // next() يبدأ من أول جزء في المجموعة (أو من أول القائمة لو لم تعد موجودة)
+    if (at < 0) cur = -1;
+    next();
+  }
+  // قبل بدء فيديو على جهاز «فيديو واحد»: نحرر الفيديو السابق أولًا حتى لا يتزاحما على المشغّل الوحيد
+  function releaseVideos() {
+    layers().forEach(function (l) { if (l.querySelector('video')) kill(l); });
+  }
   function stopPlayback() {
     clearTimers();
     layers().forEach(kill);
@@ -130,6 +189,7 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
 
   function next() {
     clearTimers();
+    if (builtOne !== oneVideoNow()) resync(); // انتهت مدة العرض المتتابع: نجرب العرض المتجاور من جديد
     if (!items.length) { showEmpty(); return; }
     cur = (cur + 1) % items.length;
     show(items[cur]);
@@ -145,6 +205,7 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
     // عنصر لم يُحمَّل (ملف محذوف أو إنترنت مقطوع): نتخطاه بعد لحظة
     var failLayer = function () { kill(layer); clearTimers(); timer = setTimeout(advance, 2500); };
     var el;
+    if (oneVideoNow() && (item.type === 'video' || (item.type === 'group' && videoCount(item) > 0))) releaseVideos();
 
     if (item.type === 'image') {
       el = new Image();
@@ -202,9 +263,12 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
   function showGroup(item, layer, single, advance, failLayer) {
     var parts = item.parts || [];
     var n = parts.length, pending = n, broken = false;
-    var els = [], aspects = [], videos = [];
+    var els = [], aspects = [], videos = [], playing = [];
     var fit = item.fit === 'cover' ? 'cover' : 'contain';
+    var multi = videoCount(item) > 1;
     var fail = function () { if (broken) return; broken = true; failLayer(); };
+    // فيديوهات المجموعة لم تشتغل معًا (جهاز بمشغّل فيديو واحد، أو شبكة لا تحتملها): عرض متتابع بدل شاشة سوداء
+    var giveUp = function () { if (broken) return; broken = true; useOneVideo(item); };
     var start = function () {
       var grid = Layout.choose(aspects, window.innerWidth || 16, window.innerHeight || 9);
       var pos = Layout.cells(n, grid.rows, grid.cols);
@@ -223,6 +287,11 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
       }
       clearTimeout(guard);
       reveal(layer);
+      if (multi) {
+        stall = setTimeout(function () {
+          for (var k = 0; k < videos.length; k++) if (!playing[k]) { giveUp(); return; }
+        }, GROUP_STALL_MS);
+      }
       if (single) return;
       if (longest) {
         longest.onended = advance;
@@ -246,6 +315,7 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
         el.muted = true; el.defaultMuted = true; el.preload = 'auto';
         el.setAttribute('playsinline', ''); el.setAttribute('muted', '');
         el.onloadedmetadata = function () { ready(i, el.videoWidth, el.videoHeight); };
+        (function (k) { el.onplaying = function () { playing[k] = true; }; })(videos.length);
         videos.push(el);
       } else {
         el = new Image();
@@ -261,7 +331,8 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
     if (n < 2 || !Layout) { fail(); return; }
     layer.className = 'layer group';
     stage.appendChild(layer);
-    guard = setTimeout(fail, 30000); // ملف لم يُحمَّل: نتخطى المجموعة
+    // ملف لم يُحمَّل: نتخطى المجموعة. أما أكثر من فيديو لم تبدأ معًا فعلامة جهاز «فيديو واحد»
+    guard = setTimeout(multi ? giveUp : fail, multi ? GROUP_START_MS : 30000);
     for (j = 0; j < n; j++) addPart(j);
   }
 
@@ -269,7 +340,8 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
   function applyPlaylist(newItems) {
     var curItem = (cur >= 0 && items[cur]) ? items[cur] : null;
     var wasSingle = items.length === 1;
-    items = newItems || [];
+    raw = newItems || [];
+    items = build(raw);
     if (!items.length) { stopPlayback(); showEmpty(); return; }
     if (curItem) {
       for (var i = 0; i < items.length; i++) {
@@ -343,7 +415,7 @@ html,body{margin:0;width:100%;height:100%;background:#000;overflow:hidden;cursor
     upd(); clearInterval(clockTimer); clockTimer = setInterval(upd, 15000);
   }
   function showPair(code) {
-    stopPlayback(); items = []; version = null;
+    stopPlayback(); items = []; raw = []; version = null;
     lsSet(K_PLAYLIST, '');
     clearInterval(clockTimer);
     overlay.className = 'on';

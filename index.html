@@ -137,13 +137,15 @@ const Layout = window.SignageLayout;
 const client = window.SignageApi.createClient(window.SIGNAGE_CONFIG);
 const PLAYER_URL = new URL('player.html', location.href).href;
 const LIVE_REFRESH_MS = 20000;
-const APP_VERSION = '1.0.0'; // يُرفع مع كل إصدار: sw.js و player.html و CHANGELOG.md
+const APP_VERSION = '1.0.1'; // يُرفع مع كل إصدار: sw.js و player.html و CHANGELOG.md
 
 const $ = (s, el) => (el || document).querySelector(s);
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const DAYNAME = Object.fromEntries(Core.DAYS);
 const TYPES = { image: ['🖼️', 'صورة'], video: ['🎬', 'فيديو'], group: ['🧩', 'مجموعة'], text: ['📝', 'نص'], url: ['🔗', 'رابط'] };
 const HINT_FILE = `الحد 50 ميجا للملف. المقاس المناسب: عرضي ${Core.dims(1920, 1080)} أو طولي ${Core.dims(1080, 1920)}. للفيديو استخدم MP4 قصير ومضغوط.`;
+// متصفح تلفزيونات Samsung و LG يشغّل فيديو واحدًا في المرة، فالمشغّل يعرض فيديوهات المجموعة عليها متتابعة
+const TV_NOTE = '<p class="hint" id="tvNote">📺 على تلفزيونات Samsung و LG الذكية الفيديوهات دي هتتعرض واحد ورا التاني (متصفحها بيشغّل فيديو واحد في المرة). على باقي الشاشات هتتعرض جنب بعض.</p>';
 const HINT_GROUP = 'اختار من 2 لـ 4 ملفات مع بعض (صور أو فيديوهات). بيتعرضوا في نفس الوقت ويتوزعوا تلقائيًا حسب شكل الشاشة: 3 فيديوهات طولية بيملوا شاشة عرضية. لو فيها فيديو، بتتبدل لما أطول فيديو يخلص.';
 
 let S = null;          // حالة النظام: الفروع والأماكن والشاشات والأكواد المنتظرة والمحتوى
@@ -518,7 +520,7 @@ function contentSheet(content) {
       const shape = shapes[i] && Core.mediaShape(shapes[i].w, shapes[i].h);
       return `<div>${files.length > 1 ? `ملف ${i + 1}: ` : ''}${shape ? esc(shape.label) : 'مقاس غير معروف'} · ${esc(Core.sizeText(file.size))}`
         + `${shape && shape.small ? ' <span class="chip warn">مقاس صغير: هيبان ناعم على شاشة كبيرة</span>' : ''}</div>`;
-    }).join('');
+    }).join('') + (isGroup() && files.filter((file) => file.type.startsWith('video/')).length > 1 ? TV_NOTE : '');
   });
   function renderRules() {
     $$('#rules').innerHTML = rules.map((r, i) => `

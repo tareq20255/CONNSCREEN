@@ -16,7 +16,10 @@ const MEDIA = 'https://proj.supabase.co/storage/v1/object/public/signage/';
 const Layout = require('../src/signage-layout');
 
 // media: مقاس ومدة كل ملف بالرابط الكامل {w, h, seconds}. الافتراضي: صورة 1920×1080 وفيديو 360×640
-function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing = [], media = {}, width = 1920, height = 1080 } = {}) {
+// userAgent: متصفح الجهاز. oneDecoder: جهاز بمشغّل فيديو واحد (كتلفزيونات Samsung/LG): أي فيديو جديد يُحمَّل يوقف ما قبله
+// ولا يُحمَّل غير الأخير. onePlays: كل الفيديوهات تُحمَّل لكن واحدًا فقط يشتغل فعلًا
+function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing = [], media = {}, width = 1920, height = 1080,
+  userAgent = '', oneDecoder = false, onePlays = false } = {}) {
   let now = 0;
   let seq = 0;
   const timers = new Map();
@@ -36,6 +39,7 @@ function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing
     now = end;
   }
 
+  const liveVideos = () => stage.querySelectorAll('video').filter((v) => !v.dead && v.url);
   class El {
     constructor(tag) { this.tag = tag; this.children = []; this.style = {}; this.className = ''; this.attrs = {}; this.parentNode = null; this.textContent = ''; this.id = ''; }
     appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
@@ -57,8 +61,12 @@ function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing
     set src(url) {
       this.url = url;
       if (url === 'about:blank') return;
+      if (this.tag === 'video') {
+        h.maxLiveVideos = Math.max(h.maxLiveVideos, liveVideos().length);
+        if (oneDecoder) for (const v of liveVideos()) if (v !== this) v.blocked = true;
+      }
       setTimeout(() => {
-        if (this.dead) return;
+        if (this.dead || this.blocked) return;
         if (failing.includes(url)) { if (this.onerror) this.onerror(); return; }
         const m = media[url] || {};
         if (this.tag !== 'video') {
@@ -76,11 +84,12 @@ function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing
     get currentTime() { return this.playing ? (now - this.started) / 1000 : 0; }
     // التشغيل يبدأ بعد التحميل عند autoplay أو استدعاء play()، ثم ينتهي الفيديو أو يتكرر حسب loop
     begin() {
-      if (this.playing || this.dead) return;
+      if (this.playing || this.dead || this.blocked) return;
+      if (onePlays && liveVideos().some((v) => v !== this && v.playing)) return;
       this.playing = true; this.started = now;
       if (this.onplaying) this.onplaying();
       const loopOrEnd = () => setTimeout(() => {
-        if (this.dead) return;
+        if (this.dead || this.blocked) return;
         if (this.loop) { this.started = now; this.loops = (this.loops || 0) + 1; loopOrEnd(); } else if (this.onended) this.onended();
       }, this.duration * 1000);
       loopOrEnd();
@@ -89,6 +98,8 @@ function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing
     pause() {} load() {}
   }
   const stage = new El('div'); stage.id = 'stage';
+  const appendToStage = stage.appendChild.bind(stage);
+  stage.appendChild = (layer) => { h.appended.push(layer.className); return appendToStage(layer); };
   const overlay = new El('div'); overlay.id = 'overlay';
   const net = new El('div'); net.id = 'net';
   const roots = [stage, overlay, net];
@@ -105,6 +116,8 @@ function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing
     respond: () => 'offline',   // يحدده الاختبار: كائن الرد، أو 'offline'، أو [status, body]
     pageVersion: VERSION,
     reloads: 0, replaced: null,
+    maxLiveVideos: 0,   // أكبر عدد فيديوهات محمَّلة على الصفحة في لحظة واحدة
+    appended: [],       // نوع كل طبقة أضيفت للعرض، بالترتيب
   };
   class Xhr {
     constructor() { this.headers = {}; }
@@ -133,7 +146,7 @@ function boot({ search = `?d=${DEVICE}`, stored = {}, videoSeconds = 30, failing
     SIGNAGE_CONFIG: CONFIG,
     SignageLayout: Layout,
     innerWidth: width, innerHeight: height,
-    navigator: {},
+    navigator: { userAgent },
     location: { search, pathname: '/CONNSCREEN/player.html', protocol: 'https:', reload() { h.reloads++; }, replace(u) { h.replaced = u; } },
     localStorage: { getItem: (k) => (ls.has(k) ? ls.get(k) : null), setItem: (k, v) => ls.set(k, String(v)) },
     addEventListener() {},
@@ -468,4 +481,107 @@ test('مجموعة فيها ملف لا يُحمَّل تُتخطى كلها، �
   future.respond = () => playlist([text(2, 'تاني')]);
   future.advance(61_000);
   assert.equal(future.shown(), 'text:تاني');
+});
+
+// ---------- أجهزة تشغّل فيديو واحدًا في المرة (تلفزيونات Samsung و LG) ----------
+const SAMSUNG_TV = 'Mozilla/5.0 (SMART-TV; Linux; Tizen 5.5) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/3.0 Chrome/94.0.4606.31 TV Safari/537.36';
+const LG_TV = 'Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.79 Safari/537.36 WebAppManager';
+const FOUR = ['a.mp4', 'b.mp4', 'c.mp4', 'd.mp4'];
+const fourMedia = { [`${MEDIA}a.mp4`]: { seconds: 10 }, [`${MEDIA}b.mp4`]: { seconds: 12 }, [`${MEDIA}c.mp4`]: { seconds: 8 }, [`${MEDIA}d.mp4`]: { seconds: 6 } };
+
+test('تلفزيون Samsung: مجموعة من 4 فيديوهات تُعرض واحدًا بعد الآخر بدل شاشة سوداء، وفيديو واحد فقط على الصفحة', () => {
+  for (const userAgent of [SAMSUNG_TV, LG_TV]) {
+    const p = boot({ userAgent, oneDecoder: true, media: fourMedia });
+    p.respond = () => playlist([group(1, FOUR, { fit: 'cover' }), text(2, 'عرض اليوم', 5)]);
+    p.advance(100);
+    const seen = p.watch(90000);
+    assert.deepEqual(seen.slice(0, 7), ['video:a.mp4', 'video:b.mp4', 'video:c.mp4', 'video:d.mp4', 'text:عرض اليوم', 'video:a.mp4', 'video:b.mp4'], userAgent);
+    assert.equal(p.maxLiveVideos, 1, 'الفيديو السابق يُحرَّر قبل تحميل التالي');
+    assert.ok(!p.appended.some((c) => c.includes('group')), 'لا محاولة لعرض الفيديوهات متجاورة');
+    const el = p.stage.children[p.stage.children.length - 1].children[0];
+    assert.equal(el.style.objectFit, 'contain', 'الجزء يُعرض كاملًا حتى لو المجموعة «تملأ الشاشة»');
+  }
+});
+
+test('تلفزيون Samsung: مجموعة وحدها في القائمة تدور على فيديوهاتها، والفيديو الأول يظهر فورًا', () => {
+  const p = boot({ userAgent: SAMSUNG_TV, oneDecoder: true, media: fourMedia });
+  p.respond = () => playlist([group(1, FOUR)]);
+  p.advance(100);
+  p.advance(500);
+  assert.equal(p.shown(), 'video:a.mp4', 'بلا انتظار');
+  assert.deepEqual(p.watch(60000).slice(0, 6), ['video:a.mp4', 'video:b.mp4', 'video:c.mp4', 'video:d.mp4', 'video:a.mp4', 'video:b.mp4']);
+});
+
+test('تلفزيون Samsung: مجموعة الصور، والصور مع فيديو واحد، تبقى متجاورة', () => {
+  const p = boot({ userAgent: SAMSUNG_TV, oneDecoder: true, media: fourMedia });
+  p.respond = () => playlist([group(1, ['x.jpg', 'y.jpg', 'z.jpg'], { duration: 5 }), group(2, ['x.jpg', 'a.mp4']), video(3, 'b.mp4')]);
+  p.advance(100);
+  const seen = p.watch(60000);
+  assert.deepEqual(seen.slice(0, 4), ['group:1x3', 'group:1x2', 'video:b.mp4', 'group:1x3']);
+  assert.equal(p.maxLiveVideos, 1);
+});
+
+test('تلفزيون Samsung: تعديل القائمة أثناء عرض جزء من المجموعة لا يقطعه، وحذف المجموعة ينقل لغيرها', () => {
+  const p = boot({ userAgent: SAMSUNG_TV, oneDecoder: true, media: fourMedia });
+  const g = group(1, FOUR);
+  p.respond = () => playlist([g, text(2, 'أ', 5)]);
+  p.advance(100);
+  p.advance(14000); // a (10 ث) ثم b
+  assert.equal(p.shown(), 'video:b.mp4');
+  p.respond = () => playlist([g, text(2, 'أ', 5), text(3, 'ب', 5)]);
+  p.advance(60000 - 14100 + 200); // الاستعلام التالي
+  const afterPoll = p.shown();
+  p.respond = () => playlist([text(2, 'أ', 5), text(3, 'ب', 5)]);
+  p.advance(70000); // يصل الاستعلام التالي بالقائمة بلا المجموعة
+  const seen = p.watch(30000);
+  assert.ok(/^(video:[a-d]\.mp4|text:[أب])$/.test(afterPoll), afterPoll);
+  assert.ok(seen.length >= 2 && seen.every((x) => x === 'text:أ' || x === 'text:ب'), `بعد حذف المجموعة: ${seen}`);
+  assert.equal(p.maxLiveVideos, 1);
+});
+
+test('جهاز غير معروف بمشغّل فيديو واحد: المجموعة لا تبقى سوداء، تتحول للعرض المتتابع بعد 12 ثانية وتبقى عليه', () => {
+  const p = boot({ oneDecoder: true, media: fourMedia });
+  p.respond = () => playlist([group(1, FOUR), text(2, 'عرض اليوم', 5)]);
+  p.advance(100);
+  p.advance(11500);
+  assert.equal(p.shown(), null, 'مهلة التجربة: لم يظهر شيء بعد');
+  p.advance(1500);
+  assert.equal(p.shown(), 'video:a.mp4', 'تحوّل للعرض المتتابع بدل تخطي المجموعة');
+  const seen = p.watch(80000);
+  assert.deepEqual(seen.slice(0, 7), ['video:a.mp4', 'video:b.mp4', 'video:c.mp4', 'video:d.mp4', 'text:عرض اليوم', 'video:a.mp4', 'video:b.mp4']);
+  assert.equal(p.appended.filter((c) => c.includes('group')).length, 1, 'جرّب العرض المتجاور مرة واحدة فقط');
+});
+
+test('بعد 6 ساعات على العرض المتتابع: يجرّب العرض المتجاور مرة، ولو الجهاز يقدر يكمل عليه', () => {
+  const p = boot({ oneDecoder: true, media: fourMedia });
+  p.respond = () => playlist([group(1, FOUR), text(2, 'عرض اليوم', 5)]);
+  p.advance(100);
+  p.advance(6 * 3600000 + 120000);
+  assert.equal(p.appended.filter((c) => c.includes('group')).length, 2, 'محاولة ثانية بعد 6 ساعات، ثم عودة للمتتابع');
+  assert.ok(/^(video:[a-d]\.mp4|text:عرض اليوم)$/.test(p.shown()), p.shown());
+
+  const ok = boot({ media: fourMedia }); // جهاز عادي
+  ok.respond = () => playlist([group(1, FOUR), text(2, 'عرض اليوم', 5)]);
+  ok.advance(100);
+  assert.deepEqual(ok.watch(40000).slice(0, 3), ['group:1x4', 'text:عرض اليوم', 'group:1x4']);
+  assert.equal(ok.maxLiveVideos, 4);
+});
+
+test('جهاز يحمّل كل الفيديوهات لكن يشغّل واحدًا فقط: يتحول للعرض المتتابع بعد 8 ثوانٍ', () => {
+  const p = boot({ onePlays: true, media: fourMedia });
+  p.respond = () => playlist([group(1, FOUR), text(2, 'عرض اليوم', 5)]);
+  p.advance(100);
+  p.advance(1000);
+  assert.equal(p.shown(), 'group:1x4', 'بدأ متجاورًا');
+  p.advance(8000);
+  assert.equal(p.shown(), 'video:a.mp4');
+  assert.deepEqual(p.watch(50000).slice(0, 5), ['video:a.mp4', 'video:b.mp4', 'video:c.mp4', 'video:d.mp4', 'text:عرض اليوم']);
+});
+
+test('جهاز عادي: فيديوهات قصيرة تتكرر داخل المجموعة لا تُحسب متوقفة', () => {
+  const short = { [`${MEDIA}a.mp4`]: { seconds: 4 }, [`${MEDIA}b.mp4`]: { seconds: 2 }, [`${MEDIA}c.mp4`]: { seconds: 8 }, [`${MEDIA}d.mp4`]: { seconds: 1 } };
+  const p = boot({ media: short });
+  p.respond = () => playlist([group(1, FOUR)]);
+  p.advance(100);
+  assert.deepEqual(p.watch(60000), ['group:1x4'], 'تبقى متجاورة');
 });

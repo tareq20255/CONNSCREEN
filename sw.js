@@ -1,4 +1,4 @@
-const C='connscreen-v1.0.0';const A=['./','index.html','player.html','manifest.webmanifest','icon-192.png','icon-512.png','icon-maskable-512.png','src/signage-config.js','src/signage-core.js','src/signage-api.js','src/signage-layout.js'];
+const C='connscreen-v1.0.1';const A=['./','index.html','player.html','manifest.webmanifest','icon-192.png','icon-512.png','icon-maskable-512.png','src/signage-config.js','src/signage-core.js','src/signage-api.js','src/signage-layout.js'];
 // الكاش على نفس نطاق github.io مع تطبيقات أخرى: نمسح فقط كاشات هذا التطبيق القديمة (بادئة connscreen-)
 self.addEventListener('install',e=>{e.waitUntil(caches.open(C).then(c=>c.addAll(A)).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x.startsWith('connscreen-')&&x!==C).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
